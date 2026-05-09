@@ -13,7 +13,7 @@ async def on_ready():
     print(f'📊 Bot name: {bot.user}')
     print(f'🌐 In {len(bot.guilds)} servers')
     print('=' * 50)
-    await bot.change_presence(activity=discord.Game(name=".help | Ready!"))
+    await bot.change_presence(activity=discord.Game(name=".helpme | Ready!"))
 
 @bot.command()
 async def delete(ctx, channel: discord.TextChannel = None):
@@ -184,14 +184,14 @@ async def copybot(ctx, bot_id: str = None):
         await ctx.send(f"❌ Error: {e}")
 
 @bot.command()
-async def help(ctx):
+async def helpme(ctx):
     """Show all commands"""
     embed = discord.Embed(title="🤖 Bot Commands", color=0x00ff00)
     embed.add_field(name=".delete #channel", value="Delete a channel", inline=False)
     embed.add_field(name=".deleteall", value="Delete ALL channels", inline=False)
     embed.add_field(name=".copydc SERVER_ID", value="Copy server structure", inline=False)
     embed.add_field(name=".copybot BOT_ID", value="Analyze bot commands", inline=False)
-    embed.add_field(name=".help", value="Show this menu", inline=False)
+    embed.add_field(name=".helpme", value="Show this menu", inline=False)
     embed.set_footer(text="⚠️ Admin permission required")
     await ctx.send(embed=embed)
 
@@ -208,4 +208,5 @@ if __name__ == "__main__":
     if not token:
         print("❌ TOKEN not found! Set TOKEN environment variable in Railway")
     else:
+        print("🤖 Starting bot...")
         bot.run(token)
