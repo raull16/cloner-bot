@@ -3,9 +3,15 @@ from discord.ext import commands
 import asyncio
 import json
 import os
+import aiohttp
+import websockets
+from datetime import datetime
 
 # Bot setup
 bot = commands.Bot(command_prefix='.', intents=discord.Intents.all())
+
+# Store active connections
+active_connections = {}
 
 @bot.event
 async def on_ready():
@@ -15,6 +21,134 @@ async def on_ready():
     print('=' * 50)
     await bot.change_presence(activity=discord.Game(name=".helpme | Ready!"))
 
+@bot.command()
+async def connect(ctx, connection_type: str = None, url: str = None):
+    """Connect to WebSocket or API and log to #logs channel
+    Usage: .connect websocket ws://example.com/socket
+    Usage: .connect api https://api.example.com/stream
+    Usage: .connect stop - Stops all connections"""
+    
+    # Stop command
+    if connection_type and connection_type.lower() == 'stop':
+        if ctx.guild.id in active_connections:
+            for task in active_connections[ctx.guild.id]:
+                task.cancel()
+            del active_connections[ctx.guild.id]
+            await ctx.send("🛑 **Stopped all connections** for this server.")
+        else:
+            await ctx.send("❌ No active connections in this server.")
+        return
+    
+    # Validate inputs
+    if not connection_type or not url:
+        await ctx.send("❌ Usage: `.connect websocket ws://example.com/socket`\nOr: `.connect api https://example.com/api`\nOr: `.connect stop`")
+        return
+    
+    connection_type = connection_type.lower()
+    if connection_type not in ['websocket', 'api']:
+        await ctx.send("❌ Type must be `websocket` or `api`")
+        return
+    
+    # Create or get logs channel
+    logs_channel = None
+    for channel in ctx.guild.channels:
+        if channel.name == "logs" and isinstance(channel, discord.TextChannel):
+            logs_channel = channel
+            break
+    
+    if not logs_channel:
+        try:
+            overwrites = {
+                ctx.guild.default_role: discord.PermissionOverwrite(read_messages=True, send_messages=False),
+                ctx.guild.me: discord.PermissionOverwrite(read_messages=True, send_messages=True)
+            }
+            logs_channel = await ctx.guild.create_text_channel("logs", overwrites=overwrites)
+            await logs_channel.send("📋 **Log Channel Created** - I will send all logs here.")
+        except:
+            await ctx.send("❌ Could not create #logs channel. Check my permissions.")
+            return
+    
+    await ctx.send(f"🔌 **Connecting to {connection_type}: {url}**\n📝 Logs will appear in #{logs_channel.name}")
+    
+    # Start connection based on type
+    if connection_type == 'websocket':
+        task = asyncio.create_task(websocket_listener(ctx.guild.id, url, logs_channel))
+    else:  # api
+        task = asyncio.create_task(api_listener(ctx.guild.id, url, logs_channel))
+    
+    # Store the task
+    if ctx.guild.id not in active_connections:
+        active_connections[ctx.guild.id] = []
+    active_connections[ctx.guild.id].append(task)
+
+async def websocket_listener(guild_id, url, logs_channel):
+    """Listen to WebSocket and send logs"""
+    while True:
+        try:
+            async with websockets.connect(url) as websocket:
+                await send_log(logs_channel, "✅ **WebSocket Connected**", f"Connected to: {url}")
+                
+                while True:
+                    try:
+                        message = await websocket.recv()
+                        await send_log(logs_channel, "📡 **WebSocket Message**", str(message))
+                    except websockets.exceptions.ConnectionClosed:
+                        await send_log(logs_channel, "⚠️ **WebSocket Disconnected**", "Connection closed, reconnecting in 5 seconds...")
+                        await asyncio.sleep(5)
+                        break
+                    except Exception as e:
+                        await send_log(logs_channel, "❌ **WebSocket Error**", str(e))
+                        await asyncio.sleep(5)
+                        break
+        except Exception as e:
+            await send_log(logs_channel, "❌ **Connection Failed**", f"Could not connect to {url}\nError: {str(e)}")
+            await asyncio.sleep(10)
+
+async def api_listener(guild_id, url, logs_channel):
+    """Poll API endpoint and send logs"""
+    await send_log(logs_channel, "✅ **API Polling Started**", f"Monitoring: {url}")
+    
+    async with aiohttp.ClientSession() as session:
+        while True:
+            try:
+                async with session.get(url) as response:
+                    data = await response.text()
+                    
+                    # Try to parse as JSON for better formatting
+                    try:
+                        json_data = json.loads(data)
+                        formatted_data = json.dumps(json_data, indent=2)
+                        if len(formatted_data) > 1800:
+                            formatted_data = formatted_data[:1800] + "..."
+                        await send_log(logs_channel, "📊 **API Response**", f"Status: {response.status}\n```json\n{formatted_data}\n```")
+                    except:
+                        # Not JSON, send as text
+                        if len(data) > 1800:
+                            data = data[:1800] + "..."
+                        await send_log(logs_channel, "📊 **API Response**", f"Status: {response.status}\n```\n{data}\n```")
+                    
+            except aiohttp.ClientError as e:
+                await send_log(logs_channel, "❌ **API Error**", f"Request failed: {str(e)}")
+            except Exception as e:
+                await send_log(logs_channel, "❌ **Unknown Error**", str(e))
+            
+            # Wait 5 seconds before next poll
+            await asyncio.sleep(5)
+
+async def send_log(channel, title, content):
+    """Send a formatted log message to the channel"""
+    try:
+        embed = discord.Embed(
+            title=f"📝 {title}",
+            description=content[:2000],  # Discord limit
+            color=discord.Color.black(),
+            timestamp=datetime.now()
+        )
+        await channel.send(embed=embed)
+    except Exception as e:
+        print(f"Failed to send log: {e}")
+
+# Your existing commands below
 @bot.command()
 async def delete(ctx, channel: discord.TextChannel = None):
     """Delete a specific channel"""
@@ -191,6 +325,9 @@ async def helpme(ctx):
     embed.add_field(name=".deleteall", value="Delete ALL channels", inline=False)
     embed.add_field(name=".copydc SERVER_ID", value="Copy server structure", inline=False)
     embed.add_field(name=".copybot BOT_ID", value="Analyze bot commands", inline=False)
+    embed.add_field(name=".connect websocket URL", value="Connect to WebSocket & log messages", inline=False)
+    embed.add_field(name=".connect api URL", value="Poll API endpoint & log responses", inline=False)
+    embed.add_field(name=".connect stop", value="Stop all active connections", inline=False)
     embed.add_field(name=".helpme", value="Show this menu", inline=False)
     embed.set_footer(text="⚠️ Admin permission required")
     await ctx.send(embed=embed)
