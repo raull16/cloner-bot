@@ -3,8 +3,8 @@ from discord.ext import commands
 import asyncio
 import json
 import os
-import aiohttp
-import websockets
+import urllib.request
+import urllib.error
 from datetime import datetime
 
 # Bot setup
@@ -23,9 +23,8 @@ async def on_ready():
 
 @bot.command()
 async def connect(ctx, connection_type: str = None, url: str = None):
-    """Connect to WebSocket or API and log to #logs channel
-    Usage: .connect websocket ws://example.com/socket
-    Usage: .connect api https://api.example.com/stream
+    """Connect to API and log to #logs channel
+    Usage: .connect api https://api.example.com/data
     Usage: .connect stop - Stops all connections"""
     
     # Stop command
@@ -41,12 +40,12 @@ async def connect(ctx, connection_type: str = None, url: str = None):
     
     # Validate inputs
     if not connection_type or not url:
-        await ctx.send("❌ Usage: `.connect websocket ws://example.com/socket`\nOr: `.connect api https://example.com/api`\nOr: `.connect stop`")
+        await ctx.send("❌ Usage: `.connect api https://api.example.com/data`\nOr: `.connect stop`")
         return
     
     connection_type = connection_type.lower()
-    if connection_type not in ['websocket', 'api']:
-        await ctx.send("❌ Type must be `websocket` or `api`")
+    if connection_type != 'api':
+        await ctx.send("❌ Currently only `api` is supported. Example: `.connect api https://api.github.com/events`")
         return
     
     # Create or get logs channel
@@ -68,72 +67,57 @@ async def connect(ctx, connection_type: str = None, url: str = None):
             await ctx.send("❌ Could not create #logs channel. Check my permissions.")
             return
     
-    await ctx.send(f"🔌 **Connecting to {connection_type}: {url}**\n📝 Logs will appear in #{logs_channel.name}")
+    await ctx.send(f"🔌 **Connecting to API: {url}**\n📝 Logs will appear in #{logs_channel.name}")
     
-    # Start connection based on type
-    if connection_type == 'websocket':
-        task = asyncio.create_task(websocket_listener(ctx.guild.id, url, logs_channel))
-    else:  # api
-        task = asyncio.create_task(api_listener(ctx.guild.id, url, logs_channel))
+    # Start API polling
+    task = asyncio.create_task(api_listener(ctx.guild.id, url, logs_channel))
     
     # Store the task
     if ctx.guild.id not in active_connections:
         active_connections[ctx.guild.id] = []
     active_connections[ctx.guild.id].append(task)
 
-async def websocket_listener(guild_id, url, logs_channel):
-    """Listen to WebSocket and send logs"""
-    while True:
-        try:
-            async with websockets.connect(url) as websocket:
-                await send_log(logs_channel, "✅ **WebSocket Connected**", f"Connected to: {url}")
-                
-                while True:
-                    try:
-                        message = await websocket.recv()
-                        await send_log(logs_channel, "📡 **WebSocket Message**", str(message))
-                    except websockets.exceptions.ConnectionClosed:
-                        await send_log(logs_channel, "⚠️ **WebSocket Disconnected**", "Connection closed, reconnecting in 5 seconds...")
-                        await asyncio.sleep(5)
-                        break
-                    except Exception as e:
-                        await send_log(logs_channel, "❌ **WebSocket Error**", str(e))
-                        await asyncio.sleep(5)
-                        break
-        except Exception as e:
-            await send_log(logs_channel, "❌ **Connection Failed**", f"Could not connect to {url}\nError: {str(e)}")
-            await asyncio.sleep(10)
+def fetch_api_data(url):
+    """Fetch data from API using built-in urllib"""
+    try:
+        req = urllib.request.Request(url, headers={'User-Agent': 'DiscordBot/1.0'})
+        with urllib.request.urlopen(req, timeout=10) as response:
+            data = response.read().decode('utf-8')
+            return data, response.status
+    except urllib.error.HTTPError as e:
+        return f"HTTP Error: {e.code}", e.code
+    except urllib.error.URLError as e:
+        return f"URL Error: {e.reason}", 0
+    except Exception as e:
+        return f"Error: {str(e)}", 0
 
 async def api_listener(guild_id, url, logs_channel):
     """Poll API endpoint and send logs"""
-    await send_log(logs_channel, "✅ **API Polling Started**", f"Monitoring: {url}")
+    await send_log(logs_channel, "✅ **API Polling Started**", f"Monitoring: {url}\nInterval: Every 10 seconds")
     
-    async with aiohttp.ClientSession() as session:
-        while True:
-            try:
-                async with session.get(url) as response:
-                    data = await response.text()
-                    
-                    # Try to parse as JSON for better formatting
-                    try:
-                        json_data = json.loads(data)
-                        formatted_data = json.dumps(json_data, indent=2)
-                        if len(formatted_data) > 1800:
-                            formatted_data = formatted_data[:1800] + "..."
-                        await send_log(logs_channel, "📊 **API Response**", f"Status: {response.status}\n```json\n{formatted_data}\n```")
-                    except:
-                        # Not JSON, send as text
-                        if len(data) > 1800:
-                            data = data[:1800] + "..."
-                        await send_log(logs_channel, "📊 **API Response**", f"Status: {response.status}\n```\n{data}\n```")
-                    
-            except aiohttp.ClientError as e:
-                await send_log(logs_channel, "❌ **API Error**", f"Request failed: {str(e)}")
-            except Exception as e:
-                await send_log(logs_channel, "❌ **Unknown Error**", str(e))
+    while True:
+        try:
+            # Run the blocking API call in a thread pool
+            data, status = await asyncio.to_thread(fetch_api_data, url)
             
-            # Wait 5 seconds before next poll
-            await asyncio.sleep(5)
+            # Try to parse as JSON for better formatting
+            try:
+                json_data = json.loads(data)
+                formatted_data = json.dumps(json_data, indent=2)
+                if len(formatted_data) > 1800:
+                    formatted_data = formatted_data[:1800] + "..."
+                await send_log(logs_channel, "📊 **API Response**", f"Status: {status}\n```json\n{formatted_data}\n```")
+            except:
+                # Not JSON, send as text
+                if len(data) > 1800:
+                    data = data[:1800] + "..."
+                await send_log(logs_channel, "📊 **API Response**", f"Status: {status}\n```\n{data}\n```")
+            
+        except Exception as e:
+            await send_log(logs_channel, "❌ **Error**", str(e))
+        
+        # Wait 10 seconds before next poll
+        await asyncio.sleep(10)
 
 async def send_log(channel, title, content):
     """Send a formatted log message to the channel"""
@@ -148,7 +132,6 @@ async def send_log(channel, title, content):
     except Exception as e:
         print(f"Failed to send log: {e}")
 
-# Your existing commands below
 @bot.command()
 async def delete(ctx, channel: discord.TextChannel = None):
     """Delete a specific channel"""
@@ -325,7 +308,6 @@ async def helpme(ctx):
     embed.add_field(name=".deleteall", value="Delete ALL channels", inline=False)
     embed.add_field(name=".copydc SERVER_ID", value="Copy server structure", inline=False)
     embed.add_field(name=".copybot BOT_ID", value="Analyze bot commands", inline=False)
-    embed.add_field(name=".connect websocket URL", value="Connect to WebSocket & log messages", inline=False)
     embed.add_field(name=".connect api URL", value="Poll API endpoint & log responses", inline=False)
     embed.add_field(name=".connect stop", value="Stop all active connections", inline=False)
     embed.add_field(name=".helpme", value="Show this menu", inline=False)
